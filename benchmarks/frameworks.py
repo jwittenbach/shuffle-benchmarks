@@ -3,11 +3,11 @@ from sys import argv, exit, stderr
 import numpy as np
 
 # benchmarking parameters
-dtype = 'int16'
-maxVal = np.iinfo(dtype).max
-
-reps = 3
-shape = (10, 10)
+reps = 1
+dims = [np.round(np.sqrt(5)**k).astype(int) for k in range(2, 15)]
+sizes = [8*d**2 for d in dims]
+print(dims)
+print(sizes)
 
 # check input
 try:
@@ -25,45 +25,59 @@ if  framework not in ['numpy', 'dask', 'bolt']:
 # 2. subtract mean from second axis
 # 3. compute sum across second axis
 if framework == 'numpy':
-    def createArray(shape, dtype):
-        return np.random.randint(low=0, high=maxVal+1, size=shape, dtype=dtype)
+    maxSize = 1e9
+
+    def createArray(dim):
+        np.random.seed(0)
+        return np.random.normal(size=(dim, dim))
 
     def computeOnArray(arr):
-        tmp = arr - arr.mean(axis=1, dtype=dtype)
-        tmp = tmp - tmp.mean(axis=0, dtype=dtype)
-        return tmp.sum(axis=0)
+        tmp = arr - arr.mean(axis=1)[:, np.newaxis]
+        return tmp.mean(axis=0)
 
 elif framework == 'dask':
-    def createArray(shape, dtype):
-        import dask.array as da
-        return da.random.randint(low=0, high=maxVal+1, size=shape, dtype=dtype, chunks=(1, shape[1]))
+    maxSize = 1e6
 
-    def computOnArray(arr):
-        tmp = arr - arr.mean(axis=1, dtype=dtype)
-        tmp = tmp.rechunk((shape[0], 1))
-        tmp = tmp - tmp.mean(axis=0, dtype=dtype)
-        return np.array(tmp.sum(axis=0))
+    def createArray(dim):
+        import dask.array as da
+        da.random.seed(0)
+        return da.random.normal(size=(dim, dim), chunks=(1, shape[1]))
+
+    def computeOnArray(arr):
+        tmp = arr - arr.mean(axis=1)[:, np.newaxis]
+        #tmp = tmp.rechunk((shape[0], 1))
+        return np.array(tmp.mean(axis=0))
 
 elif framework == 'bolt':
-    def createArray(shape, dtype):
-        # check that SparkContext is available
-        try:
-            sc
-        except NameError:
-            print("script must be run with PySpark when using Bolt", file=stderr)
-            exit()
+    maxSize = 1e6
 
+    from pyspark import SparkConf, SparkContext
+    conf = SparkConf().setAppName('array-benchmark')
+    sc = SparkContext(conf=conf)
+
+    def createArray(dim):
         import thunder as td
-        return td.series.fromrandom(shape, engine=sc, dtype=dtype).values
+        return td.series.fromrandom((dim, dim), engine=sc, npartitions=shape[0]).values
 
     def computeOnArray(arr):
         tmp = arr.map(lambda x: x - x.mean())
         tmp = tmp.swap((0,), (0,))
-        tmp = arr.map(lambda x: x - x.mean())
-        return np.array(tmp.map(lambda x: x.sum()).collect())
+        return tmp.map(lambda x: x.mean()).toarray()
 
 # run the program
-arr = createArray(shape, dtype)
-res = computeOnArray(arr)
+results = []
+for size, dim in zip(sizes, dims):
 
-print(res)
+    if size > maxSize:
+        break
+
+    l = []
+    for r in range(reps):
+        start = time()
+        arr = createArray(dim)
+        res = computeOnArray(arr)
+        stop = time()
+        l.append(stop - start)
+    results.append(l)
+
+print(results)
